@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="hu">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Tokaji Bringatúra - Digitális Pecsételő</title>
+    
+    <!-- Offline fallback CSS-hez (ha nincs net, a Tailwind CDN nem érhető el, ezért alapvető elrendezést adunk) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+        #map { height: 450px; width: 100%; border-radius: 1rem; z-index: 1; box-shadow: inset 0 2px 4px rgba(0,0,0,0.06); }
+        input:focus, button:focus { outline: none; }
+        
+        .tokaj-bg {
+            background-color: #fcfaf2;
+            background-image: radial-gradient(at 0% 0%, hsla(43,85%,95%,1) 0px, transparent 50%),
+                              radial-gradient(at 100% 100%, hsla(142,50%,94%,1) 0px, transparent 50%);
+        }
+        
+        @keyframes stamp-bounce {
+            0% { transform: scale(3); opacity: 0; }
+            80% { transform: scale(0.9); opacity: 0.9; }
+            100% { transform: scale(1); opacity: 1; }
+        }
+        .stamp-animated {
+            animation: stamp-bounce 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
+        }
+    </style>
+</head>
+<body class="tokaj-bg font-sans min-h-screen flex flex-col select-none text-gray-800">
+
+    <header class="bg-emerald-700 text-white p-4 shadow-lg flex justify-between items-center sticky top-0 z-50 border-b border-emerald-800">
+        <h1 class="text-xl font-bold flex items-center gap-2 tracking-wide">
+            🍇 <span class="bg-amber-500 text-emerald-950 px-2 py-0.5 rounded-md text-sm font-black uppercase">Tokaj</span> Bringatúra
+        </h1>
+        <div id="user-status" class="text-xs bg-emerald-800 border border-emerald-600/50 px-3 py-1.5 rounded-xl font-semibold shadow-sm hidden"></div>
+    </header>
+
+    <main class="flex-1 max-w-4xl w-full mx-auto p-4 space-y-4">
+        
+        <!-- LOGIN PANEL -->
+        <div id="login-panel" class="bg-white/90 backdrop-blur-md p-8 rounded-2xl shadow-xl text-center max-w-md mx-auto mt-12 border border-amber-100">
+            <div class="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">🚴‍♂️</div>
+            <h2 class="text-2xl font-black text-gray-950 mb-1 tracking-tight">Digitális Pecsételő</h2>
+            <p class="text-gray-600 text-sm mb-6">Lépj be a neveddel a túra indításához, az időméréshez és a pecsételéshez!</p>
+            
+            <form id="login-form" onsubmit="login(event)" class="space-y-4">
+                <input type="text" id="username-input" placeholder="Teljes neved (pl. Minta János)" 
+                       autocorrect="off" autocapitalize="words" autocomplete="name" required
+                       class="border-2 border-gray-200 bg-gray-50/50 p-3.5 rounded-xl w-full text-base font-medium focus:border-emerald-600 focus:bg-white transition-all shadow-sm">
+                <button type="submit" 
+                        class="w-full bg-emerald-600 active:bg-emerald-800 text-white py-3.5 px-4 rounded-xl font-bold shadow-md hover:shadow-lg transition-all cursor-pointer text-center block touch-manipulation text-lg">
+                    Túra Megkezdése 🚀
+                </button>
+            </form>
+            <p id="error-display" class="text-red-500 text-xs mt-3 hidden font-semibold"></p>
+        </div>
+
+        <!-- MAIN INTERFACE -->
+        <div id="main-content" class="hidden space-y-4">
+            
+            <!-- STATS -->
+            <div class="grid grid-cols-2 gap-3 bg-emerald-800 text-white p-4 rounded-2xl shadow-md border border-emerald-900">
+                <div class="text-center border-r border-emerald-700/50">
+                    <p class="text-[10px] uppercase tracking-wider text-emerald-200 font-bold">Eltelt idő</p>
+                    <p id="stat-time" class="text-xl font-black tabular-nums">00:00:00</p>
+                </div>
+                <div class="text-center">
+                    <p class="text-[10px] uppercase tracking-wider text-emerald-200 font-bold">Megtett távolság</p>
+                    <p id="stat-distance" class="text-xl font-black tabular-nums">0.00 km</p>
+                </div>
+            </div>
+            
+            <!-- MAP CONTAINER -->
+            <div class="bg-white p-3 rounded-2xl shadow-md border border-gray-100 relative">
+                <div id="map"></div>
+                
+                <!-- MAP CONTROLS / STATUS -->
+                <div class="absolute bottom-6 left-6 z-[1000] flex flex-col gap-2">
+                    <button id="autofocus-btn" onclick="toggleAutofocus()" class="bg-white text-gray-800 font-bold p-2.5 rounded-xl shadow-lg border border-gray-200 flex items-center gap-1.5 text-xs active:bg-gray-100 cursor-pointer">
+                        <span id="autofocus-icon">🟢</span> <span id="autofocus-text">Képernyő követése: BE</span>
+                    </button>
+                </div>
+
+                <div class="mt-2 text-center flex justify-between items-center px-1">
+                    <p id="gps-status" class="text-xs font-semibold text-amber-600 animate-pulse">🛰️ GPS pozíció keresése...</p>
+                    <p id="offline-status" class="text-xs font-bold text-emerald-600">🟢 Offline mód aktív</p>
+                </div>
+            </div>
+
+            <!-- STAMPING PANEL -->
+            <div id="stamp-panel" class="hidden bg-amber-50/90 backdrop-blur-md p-6 rounded-2xl shadow-lg border-2 border-amber-500/40 relative overflow-hidden">
+                <div class="absolute -right-4 -bottom-4 text-7xl opacity-10 pointer-events-none select-none">📸</div>
+                <h3 id="stamp-title" class="text-xl font-black text-amber-950 mb-1">Pecsételőhely</h3>
+                <p id="stamp-distance-info" class="text-xs text-amber-800 font-bold mb-4">Távolság a ponttól: Számítás...</p>
+                
+                <div class="space-y-4">
+                    <div id="photo-trigger-container">
+                        <label for="photo-input" class="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-4 rounded-xl shadow transition-all cursor-pointer flex items-center justify-center gap-2 text-center text-sm">
+                            <span>Fénykép készítése 📸</span>
+                        </label>
+                        <input type="file" id="photo-input" accept="image/*" capture="environment" onchange="previewPhoto()" class="hidden">
+                    </div>
+                    
+                    <div id="photo-preview" class="hidden mt-2 bg-white p-2 rounded-xl border border-amber-200">
+                        <p class="text-xs font-bold text-amber-900 mb-1.5 flex items-center gap-1">✨ Elkészült igazoló kép:</p>
+                        <img id="preview-img" src="" class="max-h-52 rounded-lg shadow-sm mx-auto object-cover">
+                    </div>
+
+                    <div class="flex gap-2">
+                        <button id="submit-stamp-btn" onclick="submitStamp()" class="flex-1 bg-amber-500 active:bg-amber-600 text-amber-950 font-black py-3.5 px-4 rounded-xl shadow transition-all cursor-pointer touch-manipulation text-center">
+                            Pecsét elhelyezése 🎯
+                        </button>
+                        <button onclick="closeStampPanel()" class="bg-gray-200 active:bg-gray-300 text-gray-700 font-bold py-3.5 px-4 rounded-xl transition-all cursor-pointer touch-manipulation">
+                            Mégse
+                        </button>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- PROGRESS & RESET -->
+            <div class="bg-white p-5 rounded-2xl shadow-md border border-gray-100 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div class="flex-1 space-y-1">
+                    <h3 class="font-bold text-sm text-gray-500 uppercase tracking-wider">Saját haladásod:</h3>
+                    <div class="w-full bg-gray-100 rounded-full h-4 overflow-hidden border border-gray-200/50 p-0.5">
+                        <div id="progress-bar" class="bg-gradient-to-r from-emerald-500 to-teal-600 h-full rounded-full transition-all duration-500" style="width: 0%"></div>
+                    </div>
+                    <p id="progress-text" class="text-sm text-gray-700 font-bold pt-0.5">0 / 10 pecsételőhely teljesítve</p>
+                </div>
+                <div class="flex items-center justify-between md:justify-end gap-4 border-t md:border-t-0 pt-3 md:pt-0 border-gray-100">
+                    <button onclick="logout()" class="text-xs text-red-500 font-bold hover:underline cursor-pointer py-2 touch-manipulation">
+                        Kijelentkezés / Új kör indítása
+                    </button>
+                </div>
+            </div>
+
+            <!-- DIPLOMA / OKLEVÉL -->
+            <div id="diploma-panel" class="hidden bg-gradient-to-br from-amber-50 to-orange-100 p-8 rounded-3xl shadow-2xl border-4 border-double border-amber-600 text-center space-y-6 max-w-xl mx-auto my-6 relative overflow-hidden">
+                <div class="absolute top-0 left-0 w-full h-3 bg-gradient-to-r from-amber-500 via-yellow-400 to-emerald-600"></div>
+                <p class="text-amber-800 font-serif tracking-widest text-sm uppercase font-bold">Emléklap & Oklevél</p>
+                <h2 class="text-3xl font-black text-amber-950 font-serif leading-tight">TOKAJI BRINGATÚRA</h2>
+                <p class="text-gray-700 italic text-sm">Ezennel tanúsítjuk, hogy</p>
+                <p id="diploma-name" class="text-2xl font-black text-emerald-800 border-b-2 border-dashed border-amber-400 pb-2 max-w-xs mx-auto font-serif">Minta János</p>
+                <p class="text-gray-700 text-sm max-w-sm mx-auto">sikeresen teljesítette a Tokaj-Hegyalja digitális kerékpáros kört, és összegyűjtötte mind a 10 igazoló pecséte!</p>
+                
+                <div class="grid grid-cols-2 gap-4 bg-white/60 backdrop-blur-sm p-4 rounded-xl max-w-sm mx-auto border border-amber-200 text-left text-xs font-semibold text-amber-950">
+                    <div>⏱️ Teljesítési idő: <span id="diploma-time" class="font-black">00:00</span></div>
+                    <div>🚴‍♂️ Összes táv: <span id="diploma-dist" class="font-black">0.0 km</span></div>
+                </div>
+
+                <div class="pt-4">
+                    <span class="bg-amber-600 text-white font-bold px-4 py-2 rounded-full text-xs shadow-md uppercase tracking-wider border-2 border-white">Hivatalos Teljesítő 👑</span>
+                </div>
+                <p class="text-[10px] text-gray-400">Készíts egy képernyőképet az okleveledről a megőrzéshez!</p>
+            </div>
+
+        </div>
+    </main>
+
+    <footer class="text-center p-4 text-xs text-gray-400 font-medium">
+        Tokaji Bringatúra Digitális Igazolófüzet &copy; 2026
+    </footer>
+
+    <script>
+        // Fix pecsételőpontok koordinátái
+        const checkpoints = [
+            { id: 1, lat: 48.146694, lng: 21.385116, name: "1. Pecsételőpont - Terülj, terülj asztalkám" },
+            { id: 2, lat: 48.148963, lng: 21.373421, name: "2. Pecsételőpont - Lebuj Fogadó" },
+            { id: 3, lat: 48.155750, lng: 21.357530, name: "3. Pecsételőpont - I. frissítőpont" },
+            { id: 4, lat: 48.131144, lng: 21.346995, name: "4. Pecsételőpont - Könyves Kálmán szobor" },
+            { id: 5, lat: 48.127655, lng: 21.349076, name: "5. Pecsételőpont - Áldó Krisztus kereszteződés" },
+            { id: 6, lat: 48.104887, lng: 21.363549, name: "6. Pecsételőpont - II. frissítőpont" },
+            { id: 7, lat: 48.109770, lng: 21.398298, name: "7. Pecsételőpont - Hétszőlő dűlő" },
+            { id: 8, lat: 48.112204, lng: 21.405245, name: "8. Pecsételőpont - Szerelmi Pincesor" },
+            { id: 9, lat: 48.120026, lng: 21.413225, name: "9. Pecsételőpont - Tokaj nagyparkoló" },
+            { id: 10, lat: 48.130554, lng: 21.409706, name: "10. Pecsételőpont - Tokaj kikötő" }
+        ];
+
+        // GPX nyomvonal adatsor
+        const gpxTrackPoints = [
+            [48.132054, 21.404306], [48.131976, 21.404419], [48.132001, 21.404554], 
+            [48.132128, 21.404675], [48.132308, 21.404933], [48.132442, 21.405021], 
+            [48.132514, 21.404941], [48.132646, 21.404702], [48.132832, 21.404245], 
+            [48.133000, 21.403730], [48.133261, 21.403290], [48.133391, 21.403144], 
+            [48.133816, 21.402903], [48.134169, 21.402737], [48.134739, 21.402492], 
+            [48.135208, 21.402288], [48.135787, 21.401977], [48.136219, 21.401742], 
+            [48.136904, 21.399676], [48.137473, 21.399424], [48.138096, 21.399105], 
+            [48.138249, 21.399023], [48.138753, 21.398744], [48.139486, 21.398387], 
+            [48.139941, 21.398135], [48.140473, 21.397664], [48.140733, 21.397327], 
+            [48.141003, 21.396670], [48.141339, 21.395627], [48.141499, 21.395210], 
+            [48.141808, 21.394420], [48.142157, 21.393563], [48.142374, 21.393092], 
+            [48.142670, 21.392442], [48.143099, 21.391501], [48.143592, 21.390448], 
+            [48.143993, 21.389534], [48.144333, 21.388824], [48.144638, 21.388166], 
+            [48.144958, 21.387474], [48.145256, 21.386815], [48.145419, 21.386454], 
+            [48.145699, 21.385847], [48.146147, 21.384851], [48.146683, 21.383745], 
+            [48.147035, 21.382992], [48.147526, 21.381951], [48.147881, 21.381072], 
+            [48.148011, 21.380499], [48.147939, 21.379678], [48.147677, 21.378761], 
+            [48.147480, 21.377601], [48.147430, 21.377037], [48.147544, 21.376365], 
+            [48.147727, 21.375411], [48.148206, 21.374106], [48.148448, 21.373619], 
+            [48.148634, 21.373273], [48.149739, 21.364880], [48.155727, 21.360895],
+            [48.162275, 21.363945], [48.132480, 21.403338], [48.132100, 21.404300]
+        ];
+
+        let map;
+        let user = "";
+        let userStamps = {};
+        let activeCheckpointId = null;
+        let markersMap = {};
+        
+        // GPS & Statisztika Változók
+        let userLocationMarker = null;
+        let userLocationAccuracyCircle = null;
+        let lastLoggedLocation = null;
+        let totalDistance = 0; 
+        let startTime = null;
+        let timerInterval = null;
+        let currentLat = null;
+        let currentLng = null;
+        
+        // ÚJ: Képernyő automatikus középre igazításának állapota
+        let isAutofocusEnabled = true;
+
+        window.onload = function() {
+            try { loadStorage(); } catch(e) {}
+            initMap();
+            checkLogin();
+            updateOnlineStatus();
+            window.addEventListener('online', updateOnlineStatus);
+            window.addEventListener('offline', updateOnlineStatus);
+        };
+
+        function updateOnlineStatus() {
+            const statusEl = document.getElementById('offline-status');
+            if (navigator.onLine) {
+                statusEl.innerText = "🟢 Online";
+                statusEl.className = "text-xs font-bold text-emerald-600";
+            } else {
+                statusEl.innerText = "📶 Offline mód aktív";
+                statusEl.className = "text-xs font-bold text-amber-600 bg-amber-100 px-1.5 py-0.5 rounded";
+            }
+        }
+
+        function toggleAutofocus() {
+            isAutofocusEnabled = !isAutofocusEnabled;
+            const btnText = document.getElementById('autofocus-text');
+            const btnIcon = document.getElementById('autofocus-icon');
+            if (isAutofocusEnabled) {
+                btnText.innerText = "Képernyő követése: BE";
+                btnIcon.innerText = "🟢";
+                if (currentLat && currentLng) {
+                    map.setView([currentLat, currentLng], 15);
+                }
+            } else {
+                btnText.innerText = "Képernyő követése: KI";
+                btnIcon.innerText = "🔴";
+            }
+        }
+
+        function loadStorage() {
+            const savedUser = localStorage.getItem('tokaj_user');
+            if (savedUser) { user = savedUser; }
+        }
+
+        function initMap() {
+            map = L.map('map', { tap: false, maxZoom: 18 }).setView([48.132101, 21.403986], 13);
+            
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap'
+            }).addTo(map);
+
+            // Ha a felhasználó manuálisan elhúzza a térképet, kikapcsoljuk az automatikus követést, hogy ne rángassa vissza
+            map.on('movestart', function (e) {
+                if (e.hard) return; // ha kódból mozgatjuk, nem számít
+                if (isAutofocusEnabled) {
+                    isAutofocusEnabled = false;
+                    document.getElementById('autofocus-text').innerText = "Képernyő követése: KI";
+                    document.getElementById('autofocus-icon').innerText = "🔴";
+                }
+            });
+
+            if (gpxTrackPoints.length > 0) {
+                const trackLine = L.polyline(gpxTrackPoints, {
+                    color: '#047857', weight: 6, opacity: 0.9, lineJoin: 'round'
+                }).addTo(map);
+                map.fitBounds(trackLine.getBounds(), { padding: [20, 20] });
+            }
+            renderCheckpoints();
+        }
+
+        function startLiveTracking() {
+            if (!navigator.geolocation) {
+                document.getElementById('gps-status').innerText = "❌ A GPS nem támogatott.";
+                return;
+            }
+
+            document.getElementById('gps-status').innerText = "🛰️ Élő GPS követés aktív...";
+            
+            navigator.geolocation.watchPosition(
+                (position) => {
+                    currentLat = position.coords.latitude;
+                    currentLng = position.coords.longitude;
+                    
+                    if (lastLoggedLocation) {
+                        const dist = getDistance(lastLoggedLocation.lat, lastLoggedLocation.lng, currentLat, currentLng);
+                        if (dist > 0.002 && dist < 0.1) {
+                            totalDistance += dist;
+                            document.getElementById('stat-distance').innerText = `${totalDistance.toFixed(2)} km`;
+                        }
+                    }
+                    lastLoggedLocation = { lat: currentLat, lng: currentLng };
+
+                    // Pozíció jelölő frissítése
+                    if (userLocationMarker) {
+                        userLocationMarker.setLatLng([currentLat, currentLng]);
+                        userLocationAccuracyCircle.setLatLng([currentLat, currentLng]).setRadius(position.coords.accuracy);
+                    } else {
+                        userLocationMarker = L.circleMarker([currentLat, currentLng], {
+                            radius: 9, color: '#ffffff', fillColor: '#2563eb', fillOpacity: 1, weight: 3, shadowBlur: 5
+                        }).addTo(map);
+                        userLocationAccuracyCircle = L.circle([currentLat, currentLng], {
+                            radius: position.coords.accuracy, color: '#3b82f6', weight: 1, fillOpacity: 0.1
+                        }).addTo(map);
+                    }
+
+                    // ÚJ/MÓDOSÍTOTT: Ha be van kapcsolva a követés, a térkép fókuszál a motorosra
+                    if (isAutofocusEnabled) {
+                        map.setView([currentLat, currentLng], map.getZoom() < 14 ? 15 : map.getZoom(), { animate: true });
+                    }
+
+                    if (activeCheckpointId) { updateStampPanelDistance(); }
+                },
+                (error) => {
+                    document.getElementById('gps-status').innerText = "⚠️ Gyenge GPS jel vagy letiltott hozzáférés.";
+                },
+                { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 }
+            );
+        }
+
+        function startTimer() {
+            if (!startTime) startTime = Date.now();
+            if (timerInterval) clearInterval(timerInterval);
+            timerInterval = setInterval(() => {
+                const elapsed = Date.now() - startTime;
+                const hours = Math.floor(elapsed / 3600000).toString().padStart(2, '0');
+                const minutes = Math.floor((elapsed % 3600000) / 60000).toString().padStart(2, '0');
+                const seconds = Math.floor((elapsed % 60000) / 1000).toString().padStart(2, '0');
+                document.getElementById('stat-time').innerText = `${hours}:${minutes}:${seconds}`;
+            }, 1000);
+        }
+
+        function getDistance(lat1, lon1, lat2, lon2) {
+            const R = 6371;
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLon = (lon2 - lon1) * Math.PI / 180;
+            const a = Math.sin(dLat/2) * Math.sin(dLat/2) + Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.sin(dLon/2) * Math.sin(dLon/2);
+            return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+        }
+
+        function renderCheckpoints() {
+            if (!map) return;
+            Object.values(markersMap).forEach(m => map.removeLayer(m));
+            markersMap = {};
+
+            checkpoints.forEach((cp) => {
+                const isVisited = userStamps[cp.id];
+                const iconHtml = isVisited 
+                    ? `<div class="stamp-animated" style="background: linear-gradient(135deg, #10b981, #059669); width:32px; height:32px; border-radius:50%; border:3.5px solid #fff; box-shadow: 0 4px 10px rgba(0,0,0,0.3); display:flex; align-items:center; justify-content:center; color:white; font-size:14px; font-weight:bold;">✓</div>`
+                    : `<div style="background: linear-gradient(135deg, #f59e0b, #d97706); width:32px; height:32px; border-radius:50%; border:3.5px solid #fff; box-shadow: 0 4px 10px rgba(0,0,0,0.25); display:flex; align-items:center; justify-content:center; color:white; font-size:11px; font-weight:black; font-family:sans-serif;">${cp.id}</div>`;
+
+                const icon = L.divIcon({ className: 'custom-stamp-icon', html: iconHtml, iconSize: [32, 32], iconAnchor: [16, 16] });
+                const marker = L.marker([cp.lat, cp.lng], { icon: icon }).addTo(map);
+                
+                let popupContent = `<div class="p-1 text-center font-sans"><p class="font-bold text-gray-900 text-sm mb-1">${cp.name}</p>`;
+                if (isVisited) {
+                    popupContent += `<p class="text-emerald-600 font-bold text-xs">🎉 Sikeresen lepecsételve!</p>
+                                     <button onclick="openStampPanelById(${cp.id})" class="mt-2 text-xs bg-gray-100 text-gray-700 px-2 py-1 rounded font-semibold border hover:bg-gray-200 cursor-pointer">Fotó megtekintése</button>`;
+                } else {
+                    popupContent += `<button onclick="openStampPanelById(${cp.id})" class="mt-2 text-xs bg-emerald-600 text-white px-3 py-1.5 rounded-lg font-bold shadow hover:bg-emerald-700 cursor-pointer transition-all">Pecsételés megnyitása 📸</button>`;
+                }
+                popupContent += `</div>`;
+                marker.bindPopup(popupContent);
+                markersMap[cp.id] = marker;
+            });
+            updateProgress();
+        }
+
+        function openStampPanelById(id) {
+            const cp = checkpoints.find(c => c.id === id);
+            if (!cp) return;
+            map.closePopup();
+            activeCheckpointId = cp.id;
+            document.getElementById('stamp-panel').classList.remove('hidden');
+            document.getElementById('stamp-title').innerText = cp.name;
+            updateStampPanelDistance();
+            
+            if (userStamps[cp.id]) {
+                document.getElementById('photo-preview').classList.remove('hidden');
+                document.getElementById('preview-img').src = userStamps[cp.id];
+                document.getElementById('photo-trigger-container').classList.add('hidden');
+                document.getElementById('submit-stamp-btn').style.display = "none";
+            } else {
+                document.getElementById('photo-preview').classList.add('hidden');
+                document.getElementById('preview-img').src = "";
+                document.getElementById('photo-input').value = "";
+                document.getElementById('photo-trigger-container').classList.remove('hidden');
+                document.getElementById('submit-stamp-btn').style.display = "block";
+            }
+            document.getElementById('stamp-panel').scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function updateStampPanelDistance() {
+            const cp = checkpoints.find(c => c.id === activeCheckpointId);
+            if (!cp) return;
+            const btn = document.getElementById('submit-stamp-btn');
+
+            if (currentLat && currentLng) {
+                const distInMeters = Math.round(getDistance(currentLat, currentLng, cp.lat, cp.lng) * 1000);
+                if (userStamps[cp.id]) {
+                    document.getElementById('stamp-distance-info').innerHTML = `ℹ️ Ezt a pontot már teljesítetted.`;
+                    return;
+                }
+                if (distInMeters <= 100) {
+                    document.getElementById('stamp-distance-info').innerHTML = `✅ <span class="text-emerald-700 font-black">Körzeten belül vagy! (${distInMeters} m)</span>`;
+                    btn.disabled = false; btn.classList.remove('opacity-50', 'cursor-not-allowed');
+                } else {
+                    document.getElementById('stamp-distance-info').innerHTML = `🔒 <span class="text-red-600 font-bold">Túl távol vagy! (${distInMeters} m).</span> (Menj 100m-en belülre!)`;
+                    btn.disabled = true; btn.classList.add('opacity-50', 'cursor-not-allowed');
+                }
+            } else {
+                document.getElementById('stamp-distance-info').innerText = "🛰️ Pozíció lekérése...";
+                btn.disabled = true; btn.classList.add('opacity-50', 'cursor-not-allowed');
+            }
+        }
+
+        function previewPhoto() {
+            const fileInput = document.getElementById('photo-input');
+            if (fileInput.files && fileInput.files[0]) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    const img = new Image();
+                    img.onload = function() {
+                        const canvas = document.createElement('canvas');
+                        const maxW = 500; const scale = maxW / img.width;
+                        canvas.width = maxW; canvas.height = img.height * scale;
+                        const ctx = canvas.getContext('2d');
+                        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+                        document.getElementById('photo-preview').classList.remove('hidden');
+                        document.getElementById('preview-img').src = canvas.toDataURL('image/jpeg', 0.6);
+                    };
+                    img.src = e.target.result;
+                };
+                reader.readAsDataURL(fileInput.files[0]);
+            }
+        }
+
+        function submitStamp() {
+            const previewImg = document.getElementById('preview-img');
+            if (previewImg.src && previewImg.src.startsWith('data:image')) {
+                userStamps[activeCheckpointId] = previewImg.src;
+                saveStorage(); renderCheckpoints();
+                document.getElementById('stamp-panel').classList.add('hidden');
+            } else { alert("Kérlek, előbb készíts egy fotót!"); }
+        }
+
+        function closeStampPanel() { document.getElementById('stamp-panel').classList.add('hidden'); activeCheckpointId = null; }
+
+        function updateProgress() {
+            const total = checkpoints.length; const completed = Object.keys(userStamps).length;
+            const percentage = total > 0 ? (completed / total) * 100 : 0;
+            document.getElementById('progress-bar').style.width = `${percentage}%`;
+            document.getElementById('progress-text').innerText = `${completed} / ${total} pecsételőhely teljesítve`;
+            if (completed === total && total > 0) { showDiploma(); } else { document.getElementById('diploma-panel').classList.add('hidden'); }
+        }
+
+        function showDiploma() {
+            document.getElementById('diploma-name').innerText = user;
+            document.getElementById('diploma-time').innerText = document.getElementById('stat-time').innerText;
+            document.getElementById('diploma-dist').innerText = `${totalDistance.toFixed(2)} km`;
+            document.getElementById('diploma-panel').classList.remove('hidden');
+        }
+
+        function login(event) {
+            if (event) event.preventDefault();
+            const name = document.getElementById('username-input').value.trim();
+            if (name) {
+                user = name; localStorage.setItem('tokaj_user', user);
+                const savedStamps = localStorage.getItem(`tokaj_stamps_${user}`);
+                userStamps = savedStamps ? JSON.parse(savedStamps) : {};
+                const savedTime = localStorage.getItem(`tokaj_time_${user}`);
+                startTime = savedTime ? parseInt(savedTime) : Date.now();
+                localStorage.setItem(`tokaj_time_${user}`, startTime);
+                const savedDist = localStorage.getItem(`tokaj_dist_${user}`);
+                totalDistance = savedDist ? parseFloat(savedDist) : 0;
+                document.getElementById('stat-distance').innerText = `${totalDistance.toFixed(2)} km`;
+                checkLogin(); renderCheckpoints();
+            }
+        }
+
+        function logout() {
+            if(confirm("Biztosan nullázod ezt a kört?")) {
+                clearInterval(timerInterval);
+                try { localStorage.removeItem('tokaj_user'); } catch(e){}
+                user = ""; userStamps = {}; totalDistance = 0; startTime = null;
+                checkLogin(); renderCheckpoints();
+            }
+        }
+
+        function checkLogin() {
+            const userStatus = document.getElementById('user-status');
+            if (user && user !== "") {
+                document.getElementById('login-panel').classList.add('hidden');
+                document.getElementById('main-content').classList.remove('hidden');
+                userStatus.innerText = `👤 ${user}`; userStatus.classList.remove('hidden');
+                startTimer(); startLiveTracking();
+            } else {
+                document.getElementById('login-panel').classList.remove('hidden');
+                document.getElementById('main-content').classList.add('hidden');
+                userStatus.classList.add('hidden'); document.getElementById('stamp-panel').classList.add('hidden');
+                clearInterval(timerInterval);
+            }
+            setTimeout(() => { if(map) map.invalidateSize(); }, 300);
+        }
+
+        function saveStorage() {
+            try {
+                if (user) {
+                    localStorage.setItem('tokaj_user', user);
+                    localStorage.setItem(`tokaj_stamps_${user}`, JSON.stringify(userStamps));
+                    localStorage.setItem(`tokaj_time_${user}`, startTime);
+                    localStorage.setItem(`tokaj_dist_${user}`, totalDistance.toString());
+                }
+            } catch(e) {}
+        }
+    </script>
+
+    <!-- OFFLINE MŰKÖDÉST BIZTOSÍTÓ MINI SERVICE WORKER -->
+    <script>
+        if ('serviceWorker' in navigator) {
+            const blob = new Blob([`
+                const CACHE_NAME = 'tokaj-bike-v1';
+                const assets = [
+                    '/',
+                    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.css',
+                    'https://unpkg.com/leaflet@1.9.4/dist/leaflet.js',
+                    'https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4'
+                ];
+                self.addEventListener('install', e => {
+                    e.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(assets)));
+                });
+                self.addEventListener('fetch', e => {
+                    e.respondWith(caches.match(e.request).then(cachedResponse => {
+                        return cachedResponse || fetch(e.request).catch(() => {
+                            // Offline mód kezelése ha nincs hálózat és cache-elve sincs az adott elem
+                        });
+                    }));
+                });
+            `], { type: 'application/javascript' });
+            
+            navigator.serviceWorker.register(URL.createObjectURL(blob))
+                .then(() => console.log("Offline üzemmód felkészítve (Service Worker aktív)!"))
+                .catch(err => console.log("Service worker hiba: ", err));
+        }
+    </script>
+</body>
+</html>
